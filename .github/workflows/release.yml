@@ -1,0 +1,83 @@
+name: Compilar, verificar y publicar
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: '11.25.0'
+          run_install: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: npm test
+      - run: python -m pip install -r requirements.txt
+      - run: python -m unittest discover -s tests -p "test_*.py"
+      - run: npm run build:web
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:browser
+      - run: python scripts/distribution.py check
+      - run: python scripts/distribution.py web
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-assets
+          path: dist/web/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: final-web
+          path: dist/tuto-api-flask-Web.zip
+  publish:
+    needs: [web]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: final-*
+          path: artifacts
+          merge-multiple: true
+      - run: python scripts/distribution.py finalize artifacts
+      - name: Publicar conjunto verificado
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          version="$(python -c 'import json; print(json.load(open("project.json"))["version"])')"
+          tag="v$version"
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "$tag" ]; then exit 1; fi
+          gh release create "$tag" artifacts/* --draft --target "$GITHUB_SHA" --title 'API Flask de ejemplo 2.0.0' --notes-file docs/releases/v2.0.0.md
+          gh release edit "$tag" --draft=false --latest
+  pages:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-assets
+          path: web
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web
+      - uses: actions/deploy-pages@v4
+        id: deployment
